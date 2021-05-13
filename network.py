@@ -1,42 +1,9 @@
 import tensorflow as tf
 
-from rl.network.noisy_dense import IndependentDense
 import numpy as np
 # from tensorflow.keras.mixed_precision import experimental as mixed_precision
 # policy = mixed_precision.Policy('mixed_float16')
 # mixed_precision.set_policy(policy)
-
-
-custom_objects = {"IndependentDense": IndependentDense}
-
-pv = tf.keras.layers.Input((1,), name="pv")
-tpv = tf.keras.layers.Input((10, 1), name="tpv")
-reg = tf.keras.regularizers.l1_l2()
-
-
-def dueling_network(x):
-    return x
-
-
-def output(x, noisy, dueling, action_size):
-    dense = IndependentDense if noisy else tf.keras.layers.Dense
-
-    if dueling:
-        # v, a = tf.split(x, 2, axis=-1)
-
-        v = dense(256, "elu", kernel_initializer="he_normal")(x)
-        v = dense(1)(v)
-
-        a = dense(256, "elu", kernel_initializer="he_normal")(x)
-        a = dense(action_size)(a)
-
-        x = v + (a - tf.reduce_mean(a, -1, keepdims=True))
-        x = tf.keras.layers.Lambda(dueling_network, name="q")(x)
-    else:
-        # x = dense(256, "elu", kernel_initializer="he_normal", bias_initializer="he_normal", kernel_regularizer=reg)(x)
-        # x = dense(action_size, name="q")(x)
-        x = dense(action_size, "softmax", name="q")(x)
-    return x
 
 
 def conv1(x):
@@ -530,48 +497,6 @@ def erace_wide_resnet(x):
     return x
 
 
-# class TransformerBlock(layers.Layer):
-#     def __init__(self, embed_dim, num_heads, ff_dim, rate=0.1):
-#         super(TransformerBlock, self).__init__()
-#         self.att = layers.MultiHeadAttention(num_heads=num_heads, key_dim=embed_dim)
-#         self.ffn = keras.Sequential(
-#             [layers.Dense(ff_dim, activation="relu"), layers.Dense(embed_dim),]
-#         )
-#         self.layernorm1 = layers.LayerNormalization(epsilon=1e-6)
-#         self.layernorm2 = layers.LayerNormalization(epsilon=1e-6)
-#         self.dropout1 = layers.Dropout(rate)
-#         self.dropout2 = layers.Dropout(rate)
-#
-#     def call(self, inputs, training=False):
-#         attn_output = self.att(inputs, inputs)
-#         attn_output = self.dropout1(attn_output, training=training)
-#         out1 = self.layernorm1(inputs + attn_output)
-#         ffn_output = self.ffn(out1)
-#         ffn_output = self.dropout2(ffn_output, training=training)
-#         return self.layernorm2(out1 + ffn_output)
-#
-#
-# def get_angles(pos, i, d_model):
-#   angle_rates = 1 / np.power(10000, (2 * (i//2)) / np.float32(d_model))
-#   return pos * angle_rates
-#
-#
-# def positional_encoding(position=10000, d_model=512):
-#   angle_rads = get_angles(np.arange(position)[:, np.newaxis],
-#                           np.arange(d_model)[np.newaxis, :],
-#                           d_model)
-#
-#   # 配列中の偶数インデックスにはsinを適用; 2i
-#   angle_rads[:, 0::2] = np.sin(angle_rads[:, 0::2])
-#
-#   # 配列中の奇数インデックスにはcosを適用; 2i+1
-#   angle_rads[:, 1::2] = np.cos(angle_rads[:, 1::2])
-#
-#   pos_encoding = angle_rads[np.newaxis, ...]
-#
-#   return tf.cast(pos_encoding, dtype=tf.float32)
-
-
 def repvgg(x):
     def block(x, f, n):
         i = x
@@ -756,7 +681,6 @@ def se_choicenet(x):
     return x
 
 
-#計算オーバーヘッドがでかい
 def cbam(x:tf.keras.layers.Layer, r:int):
     c = x.get_shape().as_list()[-1]
     w0 = tf.keras.layers.Dense(c // r, "elu", kernel_initializer="he_normal")
@@ -991,8 +915,7 @@ def bom_densenet(x):
 
 def model(dim: tuple, action_size: int, dueling: bool, noisy: bool) -> tf.keras.Model:
     i = tf.keras.layers.Input(dim, name="i")
-    x = tf.keras.layers.GaussianDropout(0.05)(i)
-
+    
     x = bom_densenet(i)
 
     x = output(x, noisy, dueling, action_size)

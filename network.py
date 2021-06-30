@@ -1,7 +1,5 @@
 import tensorflow as tf
-from tensorflow.python.keras.engine import data_adapter
 tnp = tf.experimental.numpy
-from tensorflow.python.framework import ops
 
 conv_args = {
     "filters": 32, "kernel_size": 1, "strides": 1, "padding": "same", "groups": 1, "kernel_initializer": "he_normal"

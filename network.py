@@ -1,17 +1,29 @@
 import tensorflow as tf
+try:
+    from einops.layers.tensorflow import Rearrange
+except:
+    import sys
+    import subprocess
+
+    subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'einops'])
+
+    from einops.layers.tensorflow import Rearrange
+
 tnp = tf.experimental.numpy
 
 conv_args = {
     "filters": 32, "kernel_size": 1, "strides": 1, "padding": "same", "groups": 1, "kernel_initializer": "he_normal"
 }  #
 attention_args = {
-    "num_heads": 4, "dim": 32, "dropout": 0.1, "use_bias": True, "sr_ratio": 1, "shape": None,
+    "num_heads": 4, "dim": 32, "dropout": 0.1, "use_bias": True, "sr_ratio": 1,
 }
 Conv1D = tf.keras.layers.Conv1D
+l2 = tf.keras.regularizers.l2(1e-4)
 
 
 def Inputs(input_shape, filters, kernel_size, strides, pooling):
     inputs = tf.keras.layers.Input(input_shape)
+    # x = tf.keras.layers.GaussianNoise(0.01)(inputs)
     x = tf.keras.layers.Conv1D(filters, kernel_size, strides, "same", kernel_initializer="he_normal")(inputs)
     if pooling:
         x = tf.keras.layers.AvgPool1D(3, 2)(x)
@@ -23,7 +35,7 @@ def stack(x, function, activation, layer_args, erase_relu):
     if activation:
         x = tf.keras.layers.LayerNormalization()(x)
         if not erase_relu:
-            x = tf.keras.layers.ELU()(x)
+            x = tf.keras.layers.Activation("elu")(x)
         x = tf.keras.layers.Dropout(0.1)(x)
     return function(**layer_args)(x)
 
@@ -33,6 +45,44 @@ def SE(inputs, filters, r=8):
     x = tf.keras.layers.Dense(filters // r, "elu", kernel_initializer="he_normal")(x)
     x = tf.keras.layers.Dense(filters, "sigmoid")(x)
     return tf.reshape(x, (-1, 1, filters))
+
+
+class CBAM(tf.keras.layers.Layer):
+    def __init__(self, filters, r=8):
+        super(CBAM, self).__init__()
+        self.filters = filters
+        self.r = r
+
+        self.avg_pool = tf.keras.layers.GlobalAvgPool1D()
+        self.max_pool = tf.keras.layers.GlobalMaxPool1D()
+        self.mlp = [
+            tf.keras.layers.Dense(filters // r, "elu", kernel_initializer="he_normal"),
+            tf.keras.layers.Dense(filters)
+        ]
+
+        self.concat = tf.keras.layers.Concatenate()
+        self.conv = tf.keras.layers.Conv1D(1, 7, 1, "same", activation="sigmoid")
+
+    def compute_mlp(self, x, pool):
+        x = pool(x)
+        for mlp in self.mlp:
+            x = mlp(x)
+
+        return x
+
+    def call(self, inputs, training=None, *args, **kwargs):
+        x = self.compute_mlp(inputs, self.avg_pool) + self.compute_mlp(inputs, self.max_pool)
+        x = inputs * tf.reshape(tf.nn.sigmoid(x), (-1, 1, self.filters))
+
+        conv = self.concat([tf.reduce_mean(x, -1, keepdims=True), tf.reduce_max(x, -1, keepdims=True)])
+        return x * self.conv(conv)
+
+    def get_config(self):
+        new_config = {"filters":self.filters,
+                  "r": self.r}
+        config = super(CBAM, self).get_config()
+        config.update(new_config)
+        return config
 
 
 class PositionAdd(tf.keras.layers.Layer):
@@ -51,7 +101,6 @@ class Attention(tf.keras.layers.Layer):
                  dropout=0.0,
                  use_bias=True,
                  sr_ratio=1,
-                 shape=None,
                  **kwargs):
         super(Attention, self).__init__(**kwargs)
         self._num_heads = num_heads
@@ -59,13 +108,12 @@ class Attention(tf.keras.layers.Layer):
         self._dropout = dropout
         self._use_bias = use_bias
         self._sr_ratio = int(sr_ratio)
-        self._shape = shape
         head_dim = dim // num_heads
         self.scale = head_dim ** -0.5
 
-        self.q = tf.keras.layers.Conv1D(dim, 1, 1, "causal", use_bias=use_bias)
-        self.kv = tf.keras.layers.Conv1D(dim * 2, 1, 1, "causal", use_bias=use_bias)
-        self.proj = tf.keras.layers.Conv1D(dim, 1, 1, "causal", use_bias=use_bias)
+        self.q = tf.keras.layers.Conv1D(dim, 1, 1, "same", use_bias=use_bias)
+        self.kv = tf.keras.layers.Conv1D(dim * 2, 1, 1, "same", use_bias=use_bias)
+        self.proj = tf.keras.layers.Conv1D(dim, 1, 1, "same", use_bias=use_bias)
         # self.proj = tf.keras.layers.Conv1D(shape[-1], 1, 1, "causal", use_bias=use_bias)
         if dropout > 0:
             self.drop_out = tf.keras.layers.Dropout(dropout)
@@ -74,10 +122,8 @@ class Attention(tf.keras.layers.Layer):
             self.norm = tf.keras.layers.LayerNormalization()
 
     def call(self, inputs: tf.Tensor, training=False, *args, **kwargs):
-        B, N, C = inputs.shape
         q = self.q(inputs)
-        q = tf.reshape(q, (-1, N, self._num_heads, C // self._num_heads))
-        q = tf.transpose(q, [0, 2, 1, 3])
+        q = Rearrange("b n (h k) -> b h n k", h=self._num_heads)(q)
 
         if self._sr_ratio > 1:
             kv = self.sr(inputs)
@@ -86,31 +132,98 @@ class Attention(tf.keras.layers.Layer):
             kv = inputs
 
         kv = self.kv(kv)
-        shape = kv.shape
-        kv = tf.reshape(kv, (-1, shape[1], 2, self._num_heads, C // self._num_heads))
-        kv = tf.transpose(kv, [2, 0, 3, 1, 4])
-        k, v = tnp.transpose(kv[0], (0, 1, 3, 2)), kv[1]
+        k, v = kv[:,:,:self._dim], kv[:,:,self._dim:]
+        k = Rearrange("b n (h k) -> b h k n", h=self._num_heads)(k)
+        v = Rearrange("b n (h k) -> b h n k", h=self._num_heads)(v)
 
         attn = (q @ k) * self.scale
         attn = tf.nn.softmax(attn, axis=-1)
         attn = self.drop_out(attn, training=training)
 
         x = (attn @ v)
-        x = tnp.reshape(tnp.transpose(x, (0, 2, 1, 3)), (-1, N, C))
+        x = Rearrange("b k n h -> b n (k h)")(x)
         x = self.proj(x)
 
         return x
 
+    def compute_output_shape(self, input_shape):
+        return input_shape[0], self.dim
+
     def get_config(self):
-        config = {
+        new_config = {
             "num_heads": self._num_heads,
             "dim": self._dim,
             "dropout": self._dropout,
             "sr_ratio": self._sr_ratio,
             "shape": self._shape
         }
-        base_config = super(Attention, self).get_config()
-        return dict(list(base_config.items()) + list(config.items()))
+        config = super(Attention, self).get_config()
+        config.update(new_config)
+        return config
+
+
+class LambdaLayer(tf.keras.layers.Layer):
+    def __init__(self, out_dim, heads=4, use_bias=False, u=4, kernel_size=7):
+        super(LambdaLayer, self).__init__()
+
+        self.out_dim = out_dim
+        self.k = out_dim // 1
+        self.heads = heads
+        self.v = out_dim // heads
+        self.u = u
+        self.kernel_size = kernel_size
+        self.use_bias = use_bias
+
+        self.top_q = tf.keras.layers.Conv1D(k * heads, 1, 1, "same", use_bias=use_bias)
+        self.top_k = tf.keras.layers.Conv1D(k * u, 1, 1, "same", use_bias=use_bias)
+        self.top_v = tf.keras.layers.Conv1D(self.v * self.u, 1, 1, "same", use_bias=use_bias)
+
+        self.norm_q = tf.keras.layers.LayerNormalization()
+        self.norm_k = tf.keras.layers.LayerNormalization()
+
+        self.pos_conv = tf.keras.layers.Conv2D(k, (1, self.kernel_size), padding="same")
+
+    def call(self, inputs, *args, **kwargs):
+        u, h = self.u, self.heads
+
+        q = self.top_q(inputs)
+        k = self.top_k(inputs)
+        v = self.top_v(inputs)
+
+        q = Rearrange("b n (h k) -> b h k n", h=h)(q)
+        k = Rearrange("b n (u k) -> b u k n", u=u)(k)
+        v = Rearrange("b n (u v) -> b u v n", u=u)(v)
+
+        k = tf.nn.softmax(k)
+
+        lc = tf.einsum("b u k n, b u v n -> b k v", k, v)
+        yc = tf.einsum("b h k n, b k v -> b n h v", q, lc)
+
+        v = Rearrange("b u v n -> b v n u")(v)
+        lp = self.pos_conv(v)
+        lp = Rearrange("b v n k -> b v k n")(lp)
+        yp = tf.einsum("b h k n, b v k n -> b n h v", q, lp)
+
+        y = yc + yp
+        output = Rearrange("b n h v -> b n (h v)")(y)
+
+        return output
+
+    def compute_output_shape(self, input_shape):
+        return input_shape[0], self.dim
+
+    def get_config(self):
+        new_config = {
+            "out_dim": self.out_dim,
+            "head": self.heads,
+            "use_bias": self.use_bias,
+            "u": self.u,
+            "kernel_size": self.kernel_size
+        }
+        config = super(LambdaLayer, self).get_config()
+        config.update(new_config)
+
+        return config
 
 
 class SAMModel(tf.keras.Model):
@@ -169,14 +282,14 @@ def transformer_block(i, dim, dropout=0.1, sr=1, attention=Attention, head=None)
     x = tf.keras.layers.LayerNormalization()(i)
     # x = tf.keras.layers.MultiHeadAttention(4, dim, dim, dropout)(x, x, x)
     head = head if head is not None else 4
-    x = attention(head, dim, dropout, True, 1, x.get_shape())(x)
+    x = attention(head, dim, dropout, True, 1)(x)
     i = tf.keras.layers.Add()([x, i])
     x = tf.keras.layers.LayerNormalization()(i)
 
-    x = tf.keras.layers.Conv1D(dim * 4, 1, 1, "causal", kernel_initializer="he_normal")(x)
+    x = tf.keras.layers.Conv1D(dim * 4, 1, 1, "same", kernel_initializer="he_normal")(x)
     x = tf.keras.layers.LayerNormalization()(x)
     x = tf.keras.layers.ELU()(x)
-    x = tf.keras.layers.Conv1D(dim, 1, 1, "causal")(x)
+    x = tf.keras.layers.Conv1D(dim, 1, 1, "same")(x)
 
     # x = tf.keras.layers.Dense(dim * 4, "relu", kernel_initializer="he_normal")(x)
     # # x = tf.keras.layers.Dense(dim, "gelu", kernel_initializer="he_normal")(x)
@@ -187,7 +300,7 @@ def transformer_block(i, dim, dropout=0.1, sr=1, attention=Attention, head=None)
     return x
 
 
-def mix_block(inputs, filters, se, bot, groups, erase_relu):
+def mix_block(inputs, filters, se, bot, groups, erase_relu, cbam, lambda_net):
     """
     densenetとresnetの利点を組み合わせ表現学習の特定の制限を回避する
     densenetとresnetは本質的な密なトポロジから派生している
@@ -198,16 +311,21 @@ def mix_block(inputs, filters, se, bot, groups, erase_relu):
         args = conv_args.copy()
         args.update({"filters": filters * 4, "kernel_size": 3})
         x = stack(inputs, Conv1D, True, args, erase_relu)
-        if not bot:
+        if bot:
+            args = attention_args.copy()
+            args.update({"dim": filters})
+            x = stack(x, Attention, True, args, False)
+        elif lambda_net:
+            args = {"out_dim": filters}
+            x = stack(x, LambdaLayer, True, args, False)
+        else:
             args.update({"filters": filters, "groups": groups})
             x = stack(x, Conv1D, True, args, False)
-        else:
-            args = attention_args.copy()
-            args.update({"dim": filters, "shape": x.get_shape()})
-            x = stack(x, Attention, True, args, False)
         if se:
             se = SE(x, filters)
             x = tf.keras.layers.Multiply()([x, se])
+        elif cbam:
+            x = CBAM(filters)(x)
         return x
 
     r = block(inputs, filters, se, bot, groups)
@@ -218,31 +336,35 @@ def mix_block(inputs, filters, se, bot, groups, erase_relu):
     return x
 
 
-def dense_block(inputs, filters, se, bot, groups, erase_relu):
+def dense_block(inputs, filters, se, bot, groups, erase_relu, cbam, lambda_net):
     x = tf.keras.layers.LayerNormalization()(inputs)
     if not erase_relu:
-        x = tf.keras.layers.ELU()(x)
+        x = tf.keras.layers.Activation("elu")(x)
     # x = tf.keras.layers.GaussianNoise(0.05)(x)
     x = tf.keras.layers.Dropout(0.1)(x)
     x = tf.keras.layers.Conv1D(filters * 4, 3, 1, "same", kernel_initializer="he_normal")(x)
     x = tf.keras.layers.LayerNormalization()(x)
-    x = tf.keras.layers.ELU()(x)
+    x = tf.keras.layers.Activation("elu")(x)
     # x = tf.keras.layers.GaussianNoise(0.1)(x)
     x = tf.keras.layers.Dropout(0.1)(x)
-    if not bot:
+    if bot:
+        x = Attention(4, filters, 0.1, False, 1)(x)
+    elif lambda_net:
+        x = LambdaLayer(out_dim=filters)(x)
+    else:
         x = tf.keras.layers.Conv1D(filters, 3, 1, "same", kernel_initializer="he_normal", groups=groups)(x)
         if se:
             se_ = SE(x, filters)
             x = tf.keras.layers.Multiply()([x, se_])
-    else:
-        x = tf.keras.layers.MultiHeadAttention(4, filters, dropout=0.1)(x, x)
+        elif cbam:
+            x = CBAM(filters)(x)
 
     return tf.keras.layers.Concatenate()([inputs, x])
 
 
 def Dense(input_shape, action_size=2, filters=32, num_layers=(6, 12, 32), se=False, dense_next=False, transformer=False,
-          bot=False, mix_net=False, erase_relu=False, wide=False, sam=False, **kwargs):
-    groups = 8 if dense_next else 1
+          bot=False, mix_net=False, erase_relu=False, wide=False, sam=False, cbam=False, lambda_net=False, **kwargs):
+    groups = 16 if dense_next else 1
     block = dense_block if not mix_net else mix_block
     model = SAMModel if sam else tf.keras.Model
 
@@ -252,19 +374,19 @@ def Dense(input_shape, action_size=2, filters=32, num_layers=(6, 12, 32), se=Fal
         last = i == (len(num_layers) - 1)
         bot_ = True if bot and last else False
         for _ in range(l):
-            x = block(x, filters, se, False, groups, erase_relu)
+            x = block(x, filters, se, False, groups, erase_relu, cbam, lambda_net)
         if bot_:
             channels = x.get_shape()[-1]
             x = tf.keras.layers.LayerNormalization()(x)
-            x = tf.keras.layers.ELU()(x)
+            x = tf.keras.layers.Activation("elu")(x)
             x = tf.keras.layers.Conv1D(channels // 2, 1, 1, "same", kernel_initializer="he_normal")(x)
             for _ in range(3):
-                x = block(x, filters, se, True, groups, erase_relu)
+                x = block(x, filters, se, True, groups, erase_relu, cbam, lambda_net)
 
         if not last:
             channels = x.get_shape()[-1]
             x = tf.keras.layers.LayerNormalization()(x)
-            x = tf.keras.layers.ELU()(x)
+            x = tf.keras.layers.Activation("elu")(x)
             x = tf.keras.layers.AvgPool1D()(x)
             x = tf.keras.layers.Conv1D(channels // 2, 1, 1, "same", kernel_initializer="he_normal")(x)
         else:
@@ -272,7 +394,7 @@ def Dense(input_shape, action_size=2, filters=32, num_layers=(6, 12, 32), se=Fal
                 vit_filters = 512
                 num_vit_layers = 3
                 x = tf.keras.layers.LayerNormalization()(x)
-                x = tf.keras.layers.ELU()(x)
+                x = tf.keras.layers.Activation("elu")(x)
                 x = tf.keras.layers.Conv1D(vit_filters, 1, 1, "same")(x)
                 # x = Positio。nAdd()(x)
 
@@ -320,29 +442,35 @@ def Transformer(input_shape, action_size=2, filters=32, num_layers=(3, 18, 3),
     return m
 
 
-def Pyconv(input_shape, action_size=2, filters=32, num_layers=(3, 6, 3), attention=SE, sam=False):
-    def block(i, dim, k, groups):
+def Pyconv(input_shape, action_size=2, filters=32, num_layers=(3, 6, 3), attention_ = False, attention=SE, sam=False,
+           erase=False, bot=False):
+    def block(i, dim, k, groups, attention_, attention, erase, bot):
         x = tf.keras.layers.LayerNormalization()(i)
-        x = tf.keras.layers.ELU()(x)
+        if not erase:
+            x = tf.keras.layers.ELU()(x)
         x = tf.keras.layers.Dropout(0.1)(x)
-        x = tf.keras.layers.Conv1D(dim * 4, 1, 1, "same", kernel_initializer="he_normal")(x)
+        x = tf.keras.layers.Conv1D(dim * 4, 3, 1, "same", kernel_initializer="he_normal")(x)
         x = tf.keras.layers.LayerNormalization()(x)
         x = tf.keras.layers.ELU()(x)
         x = tf.keras.layers.Dropout(0.1)(x)
 
-        c = []
-        for i_ in range(len(k)):
-            c.append(
-                tf.keras.layers.Conv1D(dim // len(k), k[i_], 1, "same", kernel_initializer="he_normal", groups=groups)(
-                    x))
-        x = tf.keras.layers.Concatenate()(c)
+        if not bot:
+            c = []
+            for i_ in range(len(k)):
+                c.append(
+                    tf.keras.layers.Conv1D(dim // len(k), k[i_], 1, "same", kernel_initializer="he_normal", groups=groups)(
+                        x))
+            x = tf.keras.layers.Concatenate()(c)
+        else:
+            # x = Attention(4, dim, dropout=0.1)(x)
+            x = tf.keras.layers.MultiHeadAttention(4, dim, dropout=0.1)(x, x)
         # x = tf.keras.layers.LayerNormalization()(x)
         # x = tf.keras.layers.ELU()(x)
 
         # x = tf.keras.layers.Conv1D(dim, 1, 1, "same", kernel_initializer="he_normal")(x)
-
-        att = attention(x, dim)
-        x = tf.keras.layers.Multiply()([att, x])
+        if attention_:
+            att = attention(x, dim)
+            x = tf.keras.layers.Multiply()([att, x])
 
         return tf.keras.layers.Concatenate()([x, i])
 
@@ -356,9 +484,13 @@ def Pyconv(input_shape, action_size=2, filters=32, num_layers=(3, 6, 3), attenti
     kernel_size = [9, 7, 5, 3]
 
     for i in range(len(num_layers)):
+        bot_ = True if bot and (i == (len(num_layers) - 1)) else False
 
         for i_ in range(num_layers[i]):
-            x = block(x, filters, kernel_size, groups)
+            x = block(x, filters, kernel_size, groups, attention_, attention, erase, bot_)
+        if bot_:
+            for _ in range(3):
+                x = block(x, filters, kernel_size, groups, attention_, attention, erase, bot_)
 
         if i != (len(num_layers) - 1):
             x = tf.keras.layers.LayerNormalization()(x)
@@ -387,52 +519,60 @@ wnl = tuple([n for _ in range(3)])
 #
 
 dense_net = lambda i, a, f=32, n=dnl: Dense(i, a, f, n)
-dense_next = lambda i, a, f=32, n=dnl: Dense(i, a, f, n, dense_next=True)
-
+bot_dense_net = lambda i, a, f=32, n=dnl: Dense(i, a, f, n, bot=True)
+sam_dense_net = lambda i, a, f=32, n=dnl: Dense(i, a, f, n, sam=True)
 se_dense_net = lambda i, a, f=32, n=dnl: Dense(i, a, f, n, se=True)
+erase_dense_net = lambda i, a, f=32, n=dnl: Dense(i, a, f, n, erase_relu=True)
+cbam_dense_net = lambda i, a, f=32, n=dnl: Dense(i, a, f, n, cbam=True)
+
+dense_next = lambda i, a, f=32, n=dnl: Dense(i, a, f, n, dense_next=True)
 se_dense_next = lambda i, a, f=32, n=dnl: Dense(i, a, f, n, se=True, dense_next=True)
-se_wide_dense_next = lambda i, a, f=wnf, n=wnl: Dense(i, a, f, n, se=True, dense_next=True, wide=True, k=k)
-se_erase_dense_next = lambda i, a, f=32, n=dnl: Dense(i, a, f, n, se=True, dense_next=True, erase_relu=True)
-se_vit_dense_next = lambda i, a, f=32, n=dnl: Dense(i, a, f, n, se=True, dense_next=True, transformer=True)
-se_bot_dense_net = lambda i, a, f=32, n=dnl: Dense(i, a, f, n, se=True, bot=True)
-se_bot_dense_next = lambda i, a, f=32, n=dnl: Dense(i, a, f, n, se=True, dense_next=True, bot=True)
-se_mix_next = lambda i, a, f=32, n=dnl: Dense(i, a, f, n, se=True, dense_next=True, mix_net=True)
-se_bot_mix_next = lambda i, a, f=32, n=dnl: Dense(i, a, f, n, se=True, dense_next=True, mix_net=True, bot=True)
+
+mix_net = lambda i, a, f=32, n=dnl: Dense(i, a, f, n, mix_net=True)
+sam_erase_mix_net = lambda i, a, f=32, n=dnl: Dense(i, a, f, n, mix_net=True, sam=True, erase_relu=True)
+
+lambda_net = lambda i, a, f=128, n=pnl: Dense(i, a, f, n, lambda_net=True)
+bot_lambda_net = lambda i, a, f=128, n=pnl: Dense(i, a, f, n, lambda_net=True, bot=True)
+sam_erase_lambda_net = lambda i, a, f=128, n=pnl: Dense(i, a, f, n, lambda_net=True, sam=True, erase_relu=True)
 
 pvt = lambda i, a, f=64, n=tnl: Transformer(i, a, f, tnl, Attention, sr=True)  # Pyramid Vision Transformer
 sam_pvt = lambda i, a, f=64, n=tnl: Transformer(i, a, f, tnl, Attention, sr=True, sam=True)
 wide_pvt = lambda i, a, f=64*5, n=(3, 3, 3): Transformer(i, a, f, tnl, Attention, sr=True)
 
-se_pyconv = lambda i, a, f=128, n=pnl: Pyconv(i, a, f, n, attention=SE)
+pyconv = lambda i, a, f=128, n=pnl: Pyconv(i, a, f, n)
+sam_bot_erase_pyconv = lambda i, a, f=128, n=pnl: Pyconv(i, a, f, n, erase=True, bot=True, sam=True)
 
 """
-bottle neck = (1, 3)
-se_dense_net = 
-    val_loss: 0.1949 - val_accuracy: 0.9285
-se_dense_next =
-    val_loss: 0.1886 - val_accuracy: 0.9306
-se_bot_dense_net =
-    val_loss: 0.2058 - val_accuracy: 0.9221
-se_bot_dense_next
-    val_loss: 0.1888 - val_accuracy: 0.9336
-se_vit_dense_next =
-    val_loss: 0.5954 - val_accuracy: 0.6908
-se_pyconv =
-    val_loss: 0.1856 - val_accuracy: 0.9321
-se_mix_next =
-    val_loss: 0.1892 - val_accuracy: 0.9374
-se_bot_mix_next =
-    val_loss: 0.1758 - val_accuracy: 0.9346
+dense net =
+    val_loss: 0.5946 - val_accuracy: 0.6925
+bot dense net =
+    val_loss: 0.5904 - val_accuracy: 0.6941
+se dense net =
+    val_loss: 0.5995 - val_accuracy: 0.6879
+sam dense net =
+    val_loss: 0.5915 - val_accuracy: 0.6943
+erase dense net =
+    val_loss: 0.5932 - val_accuracy: 0.6923
+cbam dense net =
+    val_loss: 0.6019 - val_accuracy: 0.6869
+
+dense next =
+    val_loss: 0.5957 - val_accuracy: 0.6900
+se dense next
+    val_loss: 0.5979 - val_accuracy: 0.6887
+
+pyconv =
+    val_loss: 0.5947 - val_accuracy: 0.6914
+sam_bot_erase_pyconv =
+    val_loss: 0.5891 - val_accuracy: 0.6955
     
-bottle neck = (3, 3)
-se_dense_next =
-    val_loss: 0.1692 - val_accuracy: 0.9373
-se_wide_dense_next =
-    val_loss: 0.1762 - val_accuracy: 0.9345
+mix net =
+    val_loss: 0.5909 - val_accuracy: 0.6951
+sam_erase_mix_net =
+    val_loss: 0.5864 - val_accuracy: 0.6981
     
-transformer
-pvt =
-    val_loss: 0.5780 - val_accuracy: 0.7053  
+lambda net =
+    val_loss: 0.5921 - val_accuracy: 0.6916
 """
 
 

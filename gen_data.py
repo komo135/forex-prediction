@@ -95,7 +95,7 @@ def gen_data(symbol=symbol):
         df["stoch"] = fs - ss
         df["ichimoku"] = conversion - base
         
-        df["y"] = np.where(df.sig > 0, 1, 0)
+        df["y"] = np.where(df.sig > 0, 0, 1)
 
         df["rsi"] -= 50
 

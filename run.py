@@ -33,6 +33,8 @@ if train_type == "tpu":
     model.compile(tf.keras.optimizers.Adam(1e-3), "SparseCategoricalCrossentropy", ["accuracy"], steps_per_execution = 100)
 else:
   if train_type == "gpu"
+    from tensorflow.keras.mixed_precision import experimental as mixed_precision
+    
     policy = mixed_precision.Policy('mixed_float16')
     mixed_precision.set_policy(policy)
   model = network.build_model(model_name, x.shape[-2:], 2)

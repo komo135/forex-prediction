@@ -315,9 +315,8 @@ class Model:
         self.types = types
 
     def init_conv_option(self, num_layers, dim=32, se=False, dense_next=False, transformer=False, bot=False,
-                         mix_net=False,
-                         erase_relu=False, sam=False, cbam=False, lambda_net=False, lambda_bot=False, pyconv=False,
-                         lambda_pyconv=False):
+                         mix_net=False,erase_relu=False, sam=False, cbam=False, lambda_net=False, lambda_bot=False,
+                         pyconv=False):
         self.num_layers = num_layers
         self.dim = dim
 
@@ -382,7 +381,6 @@ class Model:
 
         x = LayerNormalization()(x)
         x = ELU()(x)
-        # x = tf.keras.layers.Dropout(0.2)(x)
 
         layer_name = self.bot_name if self.bot_name is not None and self.last else self.layer_name
         x = self.layer(x, layer_name)
@@ -415,7 +413,7 @@ class Model:
         return x
 
     def conv_transition(self, x):
-        dim = x.get_shape()[-1] // 2 if self.types == "dense" else self.dim
+        dim = x.get_shape()[-1] // 2 if self.types == "dense" else self.dim * 2
 
         x = LayerNormalization()(x)
         x = ELU()(x)
@@ -463,6 +461,7 @@ n = (3, 6, 3)
 
 dense_net = lambda f=f, n=n: (dense_model.init_conv_option(n, f), dense_model)
 se_dense_net = lambda f=f, n=n: (dense_model.init_conv_option(n, f, se=True), dense_model)
+cbam_dense_net = lambda f=f, n=n: (dense_model.init_conv_option(n, f, cbam=True), dense_model)
 dense_next = lambda f=f, n=n: (dense_model.init_conv_option(n, f, dense_next=True), dense_model)
 erase_dense_net = lambda f=f, n=n: (dense_model.init_conv_option(n, f, erase_relu=True), dense_model)
 bot_dense_net = lambda f=f, n=n: (dense_model.init_conv_option(n, f, bot=True), dense_model)
@@ -470,6 +469,7 @@ lambda_bot_dense_net = lambda f=f, n=n: (dense_model.init_conv_option(n, f, lamb
 sam_dense_net = lambda f=f, n=n: (dense_model.init_conv_option(n, f, sam=True), dense_model)
 sam_dense_next = lambda f=f, n=n: (dense_opt(n, f, sam=True, dense_next=True), dense_model)
 sam_se_dense_next = lambda f=f, n=n: (dense_opt(n, f, sam=True, dense_next=True, se=True), dense_model)
+sam_bot_dense_next = lambda f=f, n=n: (dense_opt(n, f, sam=True, dense_next=True, bot=True), dense_model)
 
 mix_net = lambda f=f, n=n: (dense_model.init_conv_option(n, f, mix_net=True), dense_model)
 sam_mix_next = lambda f=f, n=n: (dense_opt(n, f, mix_net=True, sam=True, dense_next=True), dense_model)
@@ -479,6 +479,7 @@ sam_lambda_net = lambda f=f, n=n: (dense_opt(n, f, lambda_net=True, sam=True), d
 
 pyconv = lambda f=f, n=n: (dense_opt(n, f, pyconv=True), dense_model)
 sam_pyconv = lambda f=f, n=n: (dense_opt(n, f, pyconv=True, sam=True), dense_model)
+sam_se_pyconv = lambda f=f, n=n: (dense_opt(n, f, pyconv=True, sam=True, se=True), dense_model)
 
 
 def build_model(model_name: str, input_shape: tuple, output_size: int):

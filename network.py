@@ -413,7 +413,8 @@ class Model:
         return x
 
     def conv_transition(self, x):
-        dim = x.get_shape()[-1] // 2 if self.types == "dense" else self.dim * 2
+        self.dim *= 2 if self.types == "resnet" else 1
+        dim = x.get_shape()[-1] // 2 if self.types == "dense" else self.dim
 
         x = LayerNormalization()(x)
         x = ELU()(x)

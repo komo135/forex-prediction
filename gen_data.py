@@ -94,6 +94,8 @@ def gen_data(symbol=symbol):
         fs, ss = fast_stochastic(df.low, df.high, df.close)
         df["stoch"] = fs - ss
         df["ichimoku"] = conversion - base
+        
+        df["y"] = np.where(df.sig > 0, 1, 0)
 
         df["rsi"] -= 50
 
@@ -104,8 +106,7 @@ def gen_data(symbol=symbol):
         x = np.array(x)
         print(x.shape)
 
-        y = np.array(df[["close", "high", "low"]])
-        atr_ = np.array(df[["atr"]])
+        y = np.array(df["y"])
 
         print("gen time series data")
 
@@ -119,7 +120,7 @@ def gen_data(symbol=symbol):
                 time_y.append(y[i])
 
         x = np.array(time_x).reshape((-1, window_size, x.shape[-1]))
-        y = np.array(time_y).reshape((-1, y.shape[-1]))
+        y = np.array(time_y).reshape((-1, 1))
 
         x_list.append(x)
         y_list.append(y)

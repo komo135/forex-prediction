@@ -1,6 +1,5 @@
 import tensorflow as tf
-from tensorflow.keras.layers import Conv1D, Layer, Concatenate, MultiHeadAttention, LayerNormalization, Dropout, ELU, \
-    Add
+from tensorflow.keras.layers import Conv1D, Layer, Concatenate, MultiHeadAttention, LayerNormalization, ELU, Add, Dense
 
 try:
     from einops.layers.tensorflow import Rearrange
@@ -30,7 +29,7 @@ class Pyconv(Layer):
         self.dim = dim
         self.groups = groups
 
-        k = [3, 5, 7, 9]
+        self.k = k = [3, 5, 7, 9]
         self.conv = [
             Conv1D(dim // 4, k, 1, "same", kernel_initializer="he_normal", groups=groups) for k in k
         ]
@@ -54,13 +53,23 @@ class Pyconv(Layer):
         return config
 
 
-def SE(inputs, filters, r=8):
-    x = tf.keras.layers.GlobalAvgPool1D()(inputs)
-    x = tf.keras.layers.Dense(filters // r, "elu", kernel_initializer="he_normal")(x)
-    x = tf.keras.layers.Dense(filters, "sigmoid")(x)
-    x = tf.reshape(x, (-1, 1, filters))
-    x = tf.keras.layers.Multiply()([inputs, x])
-    return x
+class SE(Layer):
+    def __init__(self, dim, r=8):
+        super(SE, self).__init__()
+        self.dim = dim
+        self.r = r
+
+        self.mlp = tf.keras.Sequential([
+            Dense(dim // r, "elu", kernel_initializer="he_normal"),
+            Dense(dim, "sigmoid")
+        ])
+
+    def call(self, inputs, *args, **kwargs):
+        x = tf.reduce_mean(inputs, axis=1, keepdims=True)
+        x = self.mlp(x)
+        x *= inputs
+
+        return x
 
 
 class CBAM(tf.keras.layers.Layer):
@@ -305,8 +314,10 @@ class Model:
         """
         self.types = types
 
-    def init_conv_option(self, num_layers, dim=32, se=False, dense_next=False, transformer=False, bot=False, mix_net=False,
-                         erase_relu=False, sam=False, cbam=False, lambda_net=False, lambda_bot=False, pyconv=False):
+    def init_conv_option(self, num_layers, dim=32, se=False, dense_next=False, transformer=False, bot=False,
+                         mix_net=False,
+                         erase_relu=False, sam=False, cbam=False, lambda_net=False, lambda_bot=False, pyconv=False,
+                         lambda_pyconv=False):
         self.num_layers = num_layers
         self.dim = dim
 
@@ -324,9 +335,11 @@ class Model:
 
         self.last = False
 
-        self.layer_name = "pyconv" if pyconv else "lambda_net" if lambda_net else "conv1d"
+        self.layer_name = \
+            "pyconv" if pyconv else "lambdalayer" if lambda_net else "conv1d"
         self.conv_args = {
-            "filters": self.dim, "kernel_size": 3, "kernel_initializer": "he_normal", "groups": self.groups, "padding": "same"
+            "filters": self.dim, "kernel_size": 3, "kernel_initializer": "he_normal", "groups": self.groups,
+            "padding": "same"
         }
 
         self.bot_name = True if (bot or lambda_bot) else None
@@ -338,24 +351,26 @@ class Model:
         self.dim = dim
         self.dim_fixed = dim_fixed
 
-    def layer(self, x, function_name):
-        if function_name == "multiheadattention":
-            return MultiHeadAttention(4, self.dim, dropout=0.1)(x, x)
-        elif function_name == "attention":
-            return Attention(4, self.dim, 0.1)(x)
-        elif function_name == "lambdalayer":
+    def layer(self, x, layer_name):
+        if layer_name == "multiheadattention":
+            return MultiHeadAttention(4, self.dim, dropout=0.)(x, x)
+        elif layer_name == "attention":
+            return Attention(4, self.dim, 0.)(x)
+        elif layer_name == "lambdalayer":
             return LambdaLayer(self.dim)(x)
-        elif function_name == "conv1d":
+        elif layer_name == "conv1d":
             self.conv_args.update({"filters": self.dim})
             return Conv1D(**self.conv_args)(x)
+        elif layer_name == "pyconv":
+            return Pyconv(self.dim)(x)
 
     def block(self, x, l):
         for _ in range(l):
-            x = self.dense_block(x) if self.types == "dense" else self.res_block(x) if self.types == "resnet" else\
+            x = self.dense_block(x) if self.types == "dense" else self.res_block(x) if self.types == "resnet" else \
                 self.trans_block(x)
 
         if not self.last:
-            x = self.conv_transition(x) if self.types =="dense" or self.types == "resnet" else self.trans_transition(x)
+            x = self.conv_transition(x) if self.types == "dense" or self.types == "resnet" else self.trans_transition(x)
 
         return x
 
@@ -363,15 +378,19 @@ class Model:
         x = LayerNormalization()(x)
         if not self.erase:
             x = ELU()(x)
-        x = Dropout(0.1)(x)
         x = Conv1D(self.dim * 4 if self.types == "dense" else 1, 3, 1, "same", kernel_initializer="he_normal")(x)
 
         x = LayerNormalization()(x)
         x = ELU()(x)
-        x = Dropout(0.1)(x)
+        # x = tf.keras.layers.Dropout(0.2)(x)
 
         layer_name = self.bot_name if self.bot_name is not None and self.last else self.layer_name
         x = self.layer(x, layer_name)
+
+        if self.se:
+            x = SE(self.dim)(x)
+        elif self.cbam:
+            x = CBAM(self.dim)(x)
 
         return x
 
@@ -401,16 +420,15 @@ class Model:
         x = LayerNormalization()(x)
         x = ELU()(x)
         x = tf.keras.layers.AvgPool1D()(x)
-        x = Dropout(0.1)(x)
         x = Conv1D(dim, 1, 1, "same", kernel_initializer="he_normal")(x)
-        # x = tf.keras.layers.AvgPool1D()(x)
 
         return x
 
     def trans_transition(self, x):
         pass
 
-    def build_model(self, input_shape, action_size):
+    def build_model(self, input_shape, output_size):
+        bot_name = None
         num_layers = self.num_layers
         if self.types == "dense" or self.types == "resnet":
             bot_name = self.bot_name
@@ -430,7 +448,7 @@ class Model:
                 x = self.block(x, 3)
 
         x = tf.keras.layers.GlobalAvgPool1D()(x)
-        x = tf.keras.layers.Dense(action_size, "softmax")(x)
+        x = tf.keras.layers.Dense(output_size, "softmax")(x)
 
         return SAMModel(inputs, x) if self.sam else tf.keras.Model(inputs, x)
 
@@ -438,42 +456,32 @@ class Model:
 dense_model = Model("dense")
 trans_model = Model("transformer")
 
+dense_opt = dense_model.init_conv_option
+
 f = 128
 n = (3, 6, 3)
 
 dense_net = lambda f=f, n=n: (dense_model.init_conv_option(n, f), dense_model)
+se_dense_net = lambda f=f, n=n: (dense_model.init_conv_option(n, f, se=True), dense_model)
 dense_next = lambda f=f, n=n: (dense_model.init_conv_option(n, f, dense_next=True), dense_model)
 erase_dense_net = lambda f=f, n=n: (dense_model.init_conv_option(n, f, erase_relu=True), dense_model)
-sam_erase_bot_dense_net = lambda f=f, n=n: (
-    dense_model.init_conv_option(n, f, sam=True, erase_relu=True, bot=True),
-    dense_model
-)
-sam_erase_lambda_bot_dense_net = lambda f=f, n=n: (
-    dense_model.init_conv_option(n, f, sam=True, erase_relu=True, lambda_bot=True),
-    dense_model
-)
+bot_dense_net = lambda f=f, n=n: (dense_model.init_conv_option(n, f, bot=True), dense_model)
+lambda_bot_dense_net = lambda f=f, n=n: (dense_model.init_conv_option(n, f, lambda_bot=True), dense_model)
+sam_dense_net = lambda f=f, n=n: (dense_model.init_conv_option(n, f, sam=True), dense_model)
+sam_dense_next = lambda f=f, n=n: (dense_opt(n, f, sam=True, dense_next=True), dense_model)
+sam_se_dense_next = lambda f=f, n=n: (dense_opt(n, f, sam=True, dense_next=True, se=True), dense_model)
 
 mix_net = lambda f=f, n=n: (dense_model.init_conv_option(n, f, mix_net=True), dense_model)
-lambda_bot_mix_net = lambda f=f, n=n: (dense_model.init_conv_option(n, f, mix_net=True, lambda_bot=True), dense_model)
+sam_mix_next = lambda f=f, n=n: (dense_opt(n, f, mix_net=True, sam=True, dense_next=True), dense_model)
+
+lambda_net = lambda f=f, n=n: (dense_opt(n, f, lambda_net=True), dense_model)
+sam_lambda_net = lambda f=f, n=n: (dense_opt(n, f, lambda_net=True, sam=True), dense_model)
+
+pyconv = lambda f=f, n=n: (dense_opt(n, f, pyconv=True), dense_model)
+sam_pyconv = lambda f=f, n=n: (dense_opt(n, f, pyconv=True, sam=True), dense_model)
 
 
-"""
-dense net =
-    val_loss: 0.5900 - val_accuracy: 0.6952
-erase dense net =
-    val_loss: 0.5886 - val_accuracy: 0.6953
-dense next =
-    val_loss: 0.5925 - val_accuracy: 0.6933
-sam_erase_bot_dense_net =
-    val_loss: 0.5868 - val_accuracy: 0.6962
-sam_erase_lambda_bot_dense_net =
-    val_loss: 0.5858 - val_accuracy: 0.6978
-    
-mix net =
-    val_loss: 0.5917 - val_accuracy: 0.6946
-"""
-
-def build_model(model_name: str, input_shape: tuple, action_size: int):
-    model = eval(model_name)()[-1].build_model(input_shape, action_size)
+def build_model(model_name: str, input_shape: tuple, output_size: int):
+    model = eval(model_name)()[-1].build_model(input_shape, output_size, )
 
     return model

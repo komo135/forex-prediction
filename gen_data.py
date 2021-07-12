@@ -102,6 +102,7 @@ def gen_data(symbol=symbol):
         df = df.dropna()
 
         lists = ["sig", "sig2", "sig3", "stoch"]
+        shape = len(lists)
         x = df[lists]
         x = np.array(x)
         print(x.shape)
@@ -118,15 +119,15 @@ def gen_data(symbol=symbol):
             if i > window_size:
                 time_x.append(x[i - window_size : i])
                 time_y.append(y[i])
-
+        
         x = np.array(time_x).reshape((-1, window_size, x.shape[-1]))
-        y = np.array(time_y).reshape((-1, 1))
+        y = np.array(time_y).reshape((-1,))
 
         x_list.append(x)
         y_list.append(y)
-
-    np.save("x", np.array(x_list).astype(np.float32))
-    np.save("target", np.array(y_list).astype(np.float32))
+    
+    np.save("x", np.array(x_list).astype(np.float32).reshape(-1, window_size, shape))
+    np.save("target", np.array(y_list).astype(np.float32).reshape(-1,))
 
     print("done\n")
 

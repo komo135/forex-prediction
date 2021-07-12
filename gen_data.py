@@ -8,12 +8,7 @@ from ta.momentum import stoch, stoch_signal
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from scipy.stats import zscore
 
-dtype ="1"
-if dtype == "1":
-    symbol=["AUDUSD", "AUDJPY", "NZDJPY", "GBPJPY"] + ["EURUSD", "GBPUSD", "NZDUSD"] + ["USDJPY", "EURJPY"]
-elif dtype == "2":
-    symbol=["AUDUSD", "AUDJPY", "NZDJPY", "GBPJPY"]
-# symbol=["EURUSD"]
+symbol=["AUDUSD", "AUDJPY", "NZDJPY", "GBPJPY"] + ["EURUSD", "GBPUSD", "NZDUSD", "USDJPY", "EURJPY"]
 
 
 """
@@ -101,25 +96,13 @@ def gen_data(symbol=symbol):
         df["ichimoku"] = conversion - base
 
         df["rsi"] -= 50
-        # df["rsi"] /= 50
-        # df["sig"] = np.where(df.sig > 0, 1, -1)
 
         df = df.dropna()
-        # df.to_csv(s + ".csv")
 
-        # lists = ["sig", "sig2", "sig3", "macd", "macd2", "ema", "ema2", "ema3", "stoch", "ichimoku"]
-        # lists = ["sig", "sig2", "sig3", "macd", "stoch", "ichimoku"]
-        # lists = ["sig", "sig2", "sig3", "macd", "macd2", "ema", "ema2", "ema3", "stoch", "ichimoku"]
-        # lists = ["sig", "sig2", "sig3", "stoch"]
-        # lists = ["sig", "macd"]
-        lists = ["sig"]
-        # lists = ["sig", "macd"]
-        # lists = ["macd", "ichimoku", "stoch", "sig"]
+        lists = ["sig", "sig2", "sig3", "stoch"]
         x = df[lists]
         x = np.array(x)
-        # x = np.where(x > 0, 1, -1)
         print(x.shape)
-        # x = np.clip(x, -5, 5)
 
         y = np.array(df[["close", "high", "low"]])
         atr_ = np.array(df[["atr"]])
@@ -129,24 +112,20 @@ def gen_data(symbol=symbol):
         window_size = 120
         time_x = []
         time_y = []
-        time_atr = []
 
         for i in range(len(y)):
             if i > window_size:
                 time_x.append(x[i - window_size : i])
-                time_y.append(y[i - 1])
-                time_atr.append(atr_[i - 1])
+                time_y.append(y[i])
 
         x = np.array(time_x).reshape((-1, window_size, x.shape[-1]))
         y = np.array(time_y).reshape((-1, y.shape[-1]))
 
         x_list.append(x)
         y_list.append(y)
-        atr.append(time_atr)
 
-    np.save(f"x_{dtype}", np.array(x_list).astype(np.float32))
-    np.save(f"target_{dtype}", np.array(y_list).astype(np.float32))
-    np.save(f"atr_{dtype}", np.array(atr).astype(np.float32))
+    np.save("x", np.array(x_list).astype(np.float32))
+    np.save("target", np.array(y_list).astype(np.float32))
 
     print("done\n")
 

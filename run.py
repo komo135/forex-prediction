@@ -39,4 +39,4 @@ else:
   model.compile(tf.keras.optimizers.Adam(1e-3), "SparseCategoricalCrossentropy", ["accuracy"])
 
   
- model.fit(train_x, train_y, 512, 100, validation_data=(test_x, test_y),callbackscallbacks=train_callbacks, workers=1000, use_multiprocessing=True)
+model.fit(train_x, train_y, 512, 100, validation_data=(test_x, test_y),callbackscallbacks=train_callbacks, workers=1000, use_multiprocessing=True)

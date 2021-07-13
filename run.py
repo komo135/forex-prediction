@@ -29,8 +29,8 @@ if train_type == "tpu":
   tf.tpu.experimental.initialize_tpu_system(resolver)
   strategy = tf.distribute.TPUStrategy(resolver)
   with strategy.scope():
-    model = network.build_model(model_name, x.shape[-2:], 2)
-    model.compile(tf.keras.optimizers.Adam(1e-3), "SparseCategoricalCrossentropy", ["accuracy"], steps_per_execution = 100)
+    model = network.build_model(model_name, x.shape[-2:], 1)
+    model.compile(tf.keras.optimizers.Adam(1e-3), "mse", ["mae"], steps_per_execution = 100)
 else:
   if train_type == "gpu"
     from tensorflow.keras.mixed_precision import experimental as mixed_precision
@@ -38,8 +38,8 @@ else:
     policy = mixed_precision.Policy('mixed_float16')
     mixed_precision.set_policy(policy)
     
-  model = network.build_model(model_name, x.shape[-2:], 2)
-  model.compile(tf.keras.optimizers.Adam(1e-3), "SparseCategoricalCrossentropy", ["accuracy"])
+  model = network.build_model(model_name, x.shape[-2:], 1)
+  model.compile(tf.keras.optimizers.Adam(1e-3), "mse", ["mae"])
 
   
 model.fit(train_x, train_y, 512, 100, validation_data=(test_x, test_y),callbackscallbacks=train_callbacks, workers=1000, use_multiprocessing=True)

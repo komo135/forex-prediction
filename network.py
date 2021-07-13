@@ -447,7 +447,7 @@ class Model:
                 x = self.block(x, 3)
 
         x = tf.keras.layers.GlobalAvgPool1D()(x)
-        x = tf.keras.layers.Dense(output_size, "softmax")(x)
+        x = tf.keras.layers.Dense(output_size)(x)
 
         return SAMModel(inputs, x) if self.sam else tf.keras.Model(inputs, x)
 

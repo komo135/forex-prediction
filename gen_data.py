@@ -1,12 +1,7 @@
 import MetaTrader5 as mt5
 import numpy as np
 import pandas as pd
-import ta
-from ta.trend import _ema as ema
-from ta.momentum import stoch, stoch_signal
-# from ta.trend import
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
-from scipy.stats import zscore
+from sklearn.preprocessing import MinMaxScaler
 
 symbol=["AUDUSD", "AUDJPY", "NZDJPY", "GBPJPY", "EURUSD", "GBPUSD", "NZDUSD", "USDJPY", "EURJPY"]
 
@@ -38,7 +33,8 @@ def gen_data(symbol=symbol):
                 break
             except:
                 pass
-                
+         
+        df["close"] = MinMaxScaler().fit_transform(df["close"])
         lists = ["close"]
         shape = len(lists)
         x = df[lists]

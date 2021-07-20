@@ -483,7 +483,7 @@ sam_pyconv = lambda f=f, n=n: (dense_opt(n, f, pyconv=True, sam=True), dense_mod
 sam_se_pyconv = lambda f=f, n=n: (dense_opt(n, f, pyconv=True, sam=True, se=True), dense_model)
 
 
-def build_model(model_name: str, input_shape: tuple, output_size: int):
-    model = eval(model_name)()[-1].build_model(input_shape, output_size, )
+def build_model(model, input_shape: tuple, output_size: int):
+    model = model()[-1].build_model(input_shape, output_size, )
 
     return model

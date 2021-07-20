@@ -1,15 +1,6 @@
 import tensorflow as tf
 from tensorflow.keras.layers import Conv1D, Layer, Concatenate, MultiHeadAttention, LayerNormalization, ELU, Add, Dense
-
-try:
-    from einops.layers.tensorflow import Rearrange
-except:
-    import sys
-    import subprocess
-
-    subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'einops'])
-
-    from einops.layers.tensorflow import Rearrange
+from einops.layers.tensorflow import Rearrange
 
 
 def Inputs(input_shape, filters, kernel_size, strides, pooling):

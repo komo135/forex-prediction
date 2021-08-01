@@ -1,4 +1,4 @@
-from prediction import network as net
+from tensorflow_prediction import network as net
 
 dense_model = net.Model("dense")
 trans_model = net.Model("transformer")

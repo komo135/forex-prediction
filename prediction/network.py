@@ -1,6 +1,17 @@
 import tensorflow as tf
 from tensorflow.keras.layers import Conv1D, Layer, Concatenate, MultiHeadAttention, LayerNormalization, ELU, Add, Dense
-from einops.layers.tensorflow import Rearrange
+
+try:
+    from einops.layers.tensorflow import Rearrange
+except:
+    import sys
+    import subprocess
+
+    subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'einops'])
+
+    from einops.layers.tensorflow import Rearrange
+
+l2 = tf.keras.regularizers.l2(1e-4)
 
 
 def Inputs(input_shape, filters, kernel_size, strides, pooling):
@@ -38,7 +49,8 @@ class Pyconv(Layer):
             "dim": self.dim,
             "groups": self.groups
         }
-        config = super(Pyconv, self).get_config()
+        config = {}
+        # config = super(Pyconv, self).get_config()
         config.update(new_config)
 
         return config
@@ -61,6 +73,14 @@ class SE(Layer):
         x *= inputs
 
         return x
+
+    def get_config(self):
+        config = {
+            "dim": self.dim,
+            "r": self.r
+        }
+
+        return config
 
 
 class CBAM(tf.keras.layers.Layer):
@@ -96,7 +116,8 @@ class CBAM(tf.keras.layers.Layer):
     def get_config(self):
         new_config = {"filters": self.filters,
                       "r": self.r}
-        config = super(CBAM, self).get_config()
+        config = {}
+        # config = super(CBAM, self).get_config()
         config.update(new_config)
         return config
 
@@ -110,51 +131,74 @@ class PositionAdd(tf.keras.layers.Layer):
         return inputs + self.pe
 
 
+class DepthWiseConv1D(Layer):
+    def __init__(self, head, dim_in, dim_out, strides, use_bias):
+        self.head = head
+        self.dim_in = dim_in
+        self.dim_out = dim_out
+        self.strides = strides
+        self.use_bias = use_bias
+
+        super(DepthWiseConv1D, self).__init__()
+        self.conv = tf.keras.Sequential([
+            Conv1D(dim_in, 3, strides, "same", use_bias=use_bias, groups=dim_in),
+            LayerNormalization(),
+            Conv1D(dim_out * head, 1, 1, "same", use_bias=use_bias)
+        ])
+
+    def call(self, inputs, *args, **kwargs):
+        return self.conv(inputs)
+
+    def get_config(self):
+        config = {}
+        # config = super(DepthWiseConv1D, self).get_config()
+        config.update({
+            "head": self.head,
+            "dim_in": self.dim_in,
+            "dim_out": self.dim_out,
+            "strides": self.strides,
+            "use_bias": self.use_bias
+        })
+
+        return config
+
+
 class Attention(tf.keras.layers.Layer):
     def __init__(self,
                  num_heads,
                  dim,
-                 dropout=0.0,
+                 dropout=0.,
                  use_bias=True,
-                 sr_ratio=1,
                  **kwargs):
         super(Attention, self).__init__(**kwargs)
         self._num_heads = num_heads
         self._dim = dim
+        self.dim = dim * num_heads
         self._dropout = dropout
         self._use_bias = use_bias
-        self._sr_ratio = int(sr_ratio)
         head_dim = dim // num_heads
         self.scale = head_dim ** -0.5
 
-        self.q = tf.keras.layers.Conv1D(dim, 1, 1, "same", use_bias=use_bias)
-        self.kv = tf.keras.layers.Conv1D(dim * 2, 1, 1, "same", use_bias=use_bias)
+        # self.q = tf.keras.layers.SeparableConv1D(dim* )
+        self.q = DepthWiseConv1D(num_heads, dim, dim, 1, use_bias)
+        self.kv = DepthWiseConv1D(num_heads, dim, dim * 2, 2, use_bias)
         self.proj = tf.keras.layers.Conv1D(dim, 1, 1, "same", use_bias=use_bias)
-        # self.proj = tf.keras.layers.Conv1D(shape[-1], 1, 1, "causal", use_bias=use_bias)
         if dropout > 0:
             self.drop_out = tf.keras.layers.Dropout(dropout)
-        if sr_ratio > 1:
-            self.sr = tf.keras.layers.Conv1D(dim, sr_ratio, sr_ratio, "same", use_bias=use_bias)
-            self.norm = tf.keras.layers.LayerNormalization()
 
     def call(self, inputs: tf.Tensor, training=False, *args, **kwargs):
         q = self.q(inputs)
+        kv = self.kv(inputs)
+        k, v = kv[:, :, :self.dim], kv[:, :, self.dim:]
+
         q = Rearrange("b n (h k) -> b h n k", h=self._num_heads)(q)
-
-        if self._sr_ratio > 1:
-            kv = self.sr(inputs)
-            kv = self.norm(kv)
-        else:
-            kv = inputs
-
-        kv = self.kv(kv)
-        k, v = kv[:, :, :self._dim], kv[:, :, self._dim:]
         k = Rearrange("b n (h k) -> b h k n", h=self._num_heads)(k)
         v = Rearrange("b n (h k) -> b h n k", h=self._num_heads)(v)
 
         attn = (q @ k) * self.scale
         attn = tf.nn.softmax(attn, axis=-1)
-        attn = self.drop_out(attn, training=training)
+        if self._dropout > 0:
+            attn = self.drop_out(attn, training=training)
 
         x = (attn @ v)
         x = Rearrange("b k n h -> b n (k h)")(x)
@@ -166,15 +210,45 @@ class Attention(tf.keras.layers.Layer):
         return input_shape[0], self.dim
 
     def get_config(self):
+        config = {}
+        # config = super(Attention, self).get_config()
         new_config = {
             "num_heads": self._num_heads,
             "dim": self._dim,
             "dropout": self._dropout,
-            "sr_ratio": self._sr_ratio,
-            "shape": self._shape
+            "use_bias": self._use_bias
         }
-        config = super(Attention, self).get_config()
         config.update(new_config)
+        return config
+
+
+class TransformerMlp(Layer):
+    def __init__(self, dim):
+        super(TransformerMlp, self).__init__()
+        self.dim = dim
+
+        self.norm = LayerNormalization()
+        self.mlp = tf.keras.Sequential([
+            Conv1D(dim * 4, 1, 1, "same", kernel_initializer="he_normal"),
+            LayerNormalization(),
+            tf.keras.layers.Activation("gelu"),
+            # tf.keras.layers.Dropout(0.1),
+            Conv1D(dim, 1, 1, "same")
+
+            # Dense(dim * 4, "gelu", kernel_initializer="he_normal"),
+            # # tf.keras.layers.Dropout(0.1),
+            # Dense(dim)
+        ])
+
+    def call(self, inputs, *args, **kwargs):
+        x = self.norm(inputs)
+        return self.mlp(x) + inputs
+
+    def get_config(self):
+        config = {}
+        # config = super(TransformerMlp, self).get_config()
+        config.update({"dim": self.dim})
+
         return config
 
 
@@ -196,7 +270,7 @@ class LambdaLayer(tf.keras.layers.Layer):
         self.top_v = tf.keras.layers.Conv1D(self.v * self.u, 1, 1, "same", use_bias=use_bias)
 
         self.norm_q = tf.keras.layers.LayerNormalization()
-        self.norm_k = tf.keras.layers.LayerNormalization()
+        self.norm_v = tf.keras.layers.LayerNormalization()
 
         self.pos_conv = tf.keras.layers.Conv2D(k, (1, self.kernel_size), padding="same")
 
@@ -206,6 +280,9 @@ class LambdaLayer(tf.keras.layers.Layer):
         q = self.top_q(inputs)
         k = self.top_k(inputs)
         v = self.top_v(inputs)
+
+        q = self.norm_q(q)
+        v = self.norm_v(v)
 
         q = Rearrange("b n (h k) -> b h k n", h=h)(q)
         k = Rearrange("b n (u k) -> b u k n", u=u)(k)
@@ -237,7 +314,8 @@ class LambdaLayer(tf.keras.layers.Layer):
             "u": self.u,
             "kernel_size": self.kernel_size
         }
-        config = super(LambdaLayer, self).get_config()
+        config = {}
+        # config = super(LambdaLayer, self).get_config()
         config.update(new_config)
 
         return config
@@ -307,7 +385,7 @@ class Model:
 
     def init_conv_option(self, num_layers, dim=32, se=False, dense_next=False, transformer=False, bot=False,
                          mix_net=False,erase_relu=False, sam=False, cbam=False, lambda_net=False, lambda_bot=False,
-                         pyconv=False):
+                         pyconv=False, vit=False):
         self.num_layers = num_layers
         self.dim = dim
 
@@ -322,6 +400,7 @@ class Model:
         self.lambda_net = lambda_net
         self.lambda_bot = lambda_bot
         self.pyconv = pyconv
+        self.vit = vit
 
         self.last = False
 
@@ -334,18 +413,21 @@ class Model:
 
         self.bot_name = True if (bot or lambda_bot) else None
         if self.bot_name:
-            self.bot_name = "lambdalayer" if lambda_bot else "attention" if mix_net else "multiheadattention"
+            self.bot_name = "lambdalayer" if lambda_bot else "attention"
 
-    def init_transformer_option(self, num_layers, dim, dim_fixed=False):
+    def init_transformer_option(self, num_layers, dim, kernel_size, heads=12, sam=False, lambda_=False):
         self.num_layers = num_layers
         self.dim = dim
-        self.dim_fixed = dim_fixed
+        self.kernel_size = kernel_size
+        self.heads = heads
+        self.sam = sam
+        self.lambda_ = lambda_
 
     def layer(self, x, layer_name):
         if layer_name == "multiheadattention":
             return MultiHeadAttention(4, self.dim, dropout=0.)(x, x)
         elif layer_name == "attention":
-            return Attention(4, self.dim, 0.)(x)
+            return Attention(8, self.dim, 0.)(x)
         elif layer_name == "lambdalayer":
             return LambdaLayer(self.dim)(x)
         elif layer_name == "conv1d":
@@ -361,6 +443,16 @@ class Model:
 
         if not self.last:
             x = self.conv_transition(x) if self.types == "dense" or self.types == "resnet" else self.trans_transition(x)
+        else:
+            if self.types == "dense" or self.types == "resnet":
+                if self.vit:
+                    x = LayerNormalization()(x)
+                    x = ELU()(x)
+                    x = Conv1D(self.dim, 1, 1, "same")(x)
+
+                    self.init_transformer_option(None, self.dim, None, 8)
+                    for _ in range(3):
+                        x = self.trans_block(x)
 
         return x
 
@@ -376,15 +468,25 @@ class Model:
         layer_name = self.bot_name if self.bot_name is not None and self.last else self.layer_name
         x = self.layer(x, layer_name)
 
-        if self.se:
-            x = SE(self.dim)(x)
-        elif self.cbam:
-            x = CBAM(self.dim)(x)
+        if not (self.bot_name is not None and self.last):
+            if self.se:
+                x = SE(self.dim)(x)
+            elif self.cbam:
+                x = CBAM(self.dim)(x)
 
         return x
 
     def trans_block(self, inputs):
-        pass
+        x = LayerNormalization()(inputs)
+        # x = MultiHeadAttention(self.heads, self.dim)(x, x)
+        if self.lambda_:
+            x = LambdaLayer(self.dim, 4)(x)
+        else:
+            x = Attention(self.heads, self.dim)(x)
+        x = Add()([inputs, x])
+        x = TransformerMlp(self.dim)(x)
+
+        return x
 
     def dense_block(self, inputs):
         if self.mix:
@@ -415,7 +517,9 @@ class Model:
         return x
 
     def trans_transition(self, x):
-        pass
+        # self.dim *= 2
+        x = Conv1D(self.dim, 1, 2, "same")(x)
+        return x
 
     def build_model(self, input_shape, output_size):
         bot_name = None
@@ -424,7 +528,10 @@ class Model:
             bot_name = self.bot_name
             self.bot_name = None
 
-        inputs, x = Inputs(input_shape, self.dim, 7, 2, True)
+        if self.types == "transformer":
+            inputs, x = Inputs(input_shape, self.dim, self.kernel_size, self.kernel_size, False)
+        else:
+            inputs, x = Inputs(input_shape, self.dim, 7, 2, True)
 
         last = len(num_layers) - 1
 
@@ -435,46 +542,10 @@ class Model:
         if self.types == "dense" or self.types == "resnet":
             self.bot_name = bot_name
             if self.bot_name is not None:
-                x = self.block(x, 3)
+                x = self.block(x, 6)
 
+        x = LayerNormalization()(x)
         x = tf.keras.layers.GlobalAvgPool1D()(x)
         x = tf.keras.layers.Dense(output_size)(x)
 
         return SAMModel(inputs, x) if self.sam else tf.keras.Model(inputs, x)
-
-
-dense_model = Model("dense")
-trans_model = Model("transformer")
-
-dense_opt = dense_model.init_conv_option
-
-f = 128
-n = (3, 6, 3)
-
-dense_net = lambda f=f, n=n: (dense_model.init_conv_option(n, f), dense_model)
-se_dense_net = lambda f=f, n=n: (dense_model.init_conv_option(n, f, se=True), dense_model)
-cbam_dense_net = lambda f=f, n=n: (dense_model.init_conv_option(n, f, cbam=True), dense_model)
-dense_next = lambda f=f, n=n: (dense_model.init_conv_option(n, f, dense_next=True), dense_model)
-erase_dense_net = lambda f=f, n=n: (dense_model.init_conv_option(n, f, erase_relu=True), dense_model)
-bot_dense_net = lambda f=f, n=n: (dense_model.init_conv_option(n, f, bot=True), dense_model)
-lambda_bot_dense_net = lambda f=f, n=n: (dense_model.init_conv_option(n, f, lambda_bot=True), dense_model)
-sam_dense_net = lambda f=f, n=n: (dense_model.init_conv_option(n, f, sam=True), dense_model)
-sam_dense_next = lambda f=f, n=n: (dense_opt(n, f, sam=True, dense_next=True), dense_model)
-sam_se_dense_next = lambda f=f, n=n: (dense_opt(n, f, sam=True, dense_next=True, se=True), dense_model)
-sam_bot_dense_next = lambda f=f, n=n: (dense_opt(n, f, sam=True, dense_next=True, bot=True), dense_model)
-
-mix_net = lambda f=f, n=n: (dense_model.init_conv_option(n, f, mix_net=True), dense_model)
-sam_mix_next = lambda f=f, n=n: (dense_opt(n, f, mix_net=True, sam=True, dense_next=True), dense_model)
-
-lambda_net = lambda f=f, n=n: (dense_opt(n, f, lambda_net=True), dense_model)
-sam_lambda_net = lambda f=f, n=n: (dense_opt(n, f, lambda_net=True, sam=True), dense_model)
-
-pyconv = lambda f=f, n=n: (dense_opt(n, f, pyconv=True), dense_model)
-sam_pyconv = lambda f=f, n=n: (dense_opt(n, f, pyconv=True, sam=True), dense_model)
-sam_se_pyconv = lambda f=f, n=n: (dense_opt(n, f, pyconv=True, sam=True, se=True), dense_model)
-
-
-def build_model(model, input_shape: tuple, output_size: int):
-    model = model()[-1].build_model(input_shape, output_size, )
-
-    return model

@@ -1,7 +1,7 @@
 from setuptools import setup
 
 setuo(
-  name = "prediction",
+  name = "tensorflow_prediction",
   version = 1.0,
   description = 'prediction of stock price or forex price',
   author = 'Nagi',

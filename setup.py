@@ -7,6 +7,6 @@ setuo(
   author = 'Nagi',
   author_email = 'komoootv@gmail.com',
   license = "MIT,"
-  packages = ['prediction'],
+  packages = ['tensorflow_prediction'],
   install_requires = ['tensorflow', 'einops', 'yfinance', 'MetaTrader5', 'numpy', 'pandas', 'sklearn']
 )
